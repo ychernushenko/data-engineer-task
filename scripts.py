@@ -61,11 +61,16 @@ def logs():
 
 def seed():
     """Seed the database with test data."""
-    parser = argparse.ArgumentParser(description="Seed database with test data")
-    parser.add_argument("--advertisers", type=int, default=2, help="Number of advertisers")
-    parser.add_argument("--campaigns", type=int, default=3, help="Campaigns per advertiser")
-    parser.add_argument("--impressions", type=int, default=100, help="Impressions per campaign")
-    parser.add_argument("--ctr", type=float, default=0.1, help="Click-through rate (0.0-1.0)")
+    parser = argparse.ArgumentParser(
+        description="Seed database with test data")
+    parser.add_argument("--advertisers", type=int,
+                        default=2, help="Number of advertisers")
+    parser.add_argument("--campaigns", type=int, default=3,
+                        help="Campaigns per advertiser")
+    parser.add_argument("--impressions", type=int,
+                        default=100, help="Impressions per campaign")
+    parser.add_argument("--ctr", type=float, default=0.1,
+                        help="Click-through rate (0.0-1.0)")
     args = parser.parse_args()
 
     print(
