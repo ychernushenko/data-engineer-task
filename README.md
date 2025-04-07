@@ -96,7 +96,7 @@ Once data is populated in PostgreSQL, use the following commands to load it into
 Displays KPI analytics from ClickHouse:  
 - CTR by campaign  
 - Daily impressions and clicks  
-- CTR distribution buckets  
+- CTR per Advertiser  
 
 Example output:  
 
