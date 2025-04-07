@@ -3,7 +3,7 @@
 import os
 import argparse
 import sys
-from pipeline import TARGET_TABLE_NAMES, get_clickhouse_client, read_sql, truncate_clickhouse_tables
+from pipeline import TARGET_TABLE_NAMES, ClickHouseClient, Pipeline, read_sql
 from seed import (
     get_connection,
     create_advertisers,
@@ -151,23 +151,27 @@ def show_stats(conn):
             )
 
 
-def show_clickhouse_stats(conn):
+def show_clickhouse_stats(ch_client):
+    """
+    Display ClickHouse statistics: Campaign CTR, Daily Impressions and Clicks, CTR per Advertiser.
+    """
     print("=== 📊 Campaign CTR ===")
-    ctr_result = conn.query(read_sql("sql/analytics", "campaign_ctr.sql"))
+    ctr_result = ch_client.query(read_sql("sql/analytics", "campaign_ctr.sql"))
     print(f"{'Campaign ID':<12} {'Name':<20} {'Impressions':<12} {'Clicks':<8} {'CTR':<6}")
     print("-" * 60)
     for row in ctr_result.result_rows:
         print(f"{row[0]:<12} {row[1]:<20} {row[2]:<12} {row[3]:<8} {row[4]:.2%}")
 
     print("\n=== 📅 Daily Impressions and Clicks ===")
-    daily_result = conn.query(read_sql("sql/analytics", "daily_metrics.sql"))
+    daily_result = ch_client.query(
+        read_sql("sql/analytics", "daily_metrics.sql"))
     print(f"{'Date':<12} {'Impressions':<12} {'Clicks':<8} {'CTR':<6}")
     print("-" * 45)
     for row in daily_result.result_rows:
         print(f"{row[0]}   {row[1]:<12} {row[2]:<8} {row[3]:.2%}")
 
     print("\n=== 📈 CTR per Advertiser ===")
-    advertiser_result = conn.query(
+    advertiser_result = ch_client.query(
         read_sql("sql/analytics", "advertiser_ctr.sql"))
     print(f"{'Advertiser ID':<15} {'Name':<20} {'Impressions':<12} {'Clicks':<8} {'CTR':<6}")
     print("-" * 65)
@@ -175,7 +179,7 @@ def show_clickhouse_stats(conn):
         print(f"{row[0]:<15} {row[1]:<20} {row[2]:<12} {row[3]:<8} {row[4]:.2%}")
 
 
-def reset_data(conn, ch_conn):
+def reset_data(conn, ch_client):
     """Reset all data in the database."""
     confirmation = input("This will DELETE ALL DATA. Type 'yes' to confirm: ")
     if confirmation.lower() != "yes":
@@ -191,7 +195,7 @@ def reset_data(conn, ch_conn):
         conn.commit()
         print("All data has been deleted.")
 
-    truncate_clickhouse_tables(ch_conn, TARGET_TABLE_NAMES)
+    ch_client.truncate_tables(TARGET_TABLE_NAMES)
 
 
 def main():
@@ -206,8 +210,8 @@ def main():
         print("Could not connect to Postgres. Exiting.")
         sys.exit(1)
 
-    ch_conn = get_clickhouse_client()
-    if not ch_conn:
+    ch_client = ClickHouseClient()
+    if not ch_client.client:
         print("Could not connect to ClickHouse. Exiting.")
         sys.exit(1)
 
@@ -259,14 +263,14 @@ def main():
             show_stats(conn)
 
         elif args.command == "reset":
-            reset_data(conn, ch_conn)
+            reset_data(conn, ch_client)
 
         elif args.command == "sync":
-            from pipeline import run_pipeline
-            run_pipeline(conn, ch_conn, mode=args.mode)
+            pipeline = Pipeline(conn, ch_client, mode=args.mode)
+            pipeline.run()
 
         elif args.command == "chstats":
-            show_clickhouse_stats(ch_conn)
+            show_clickhouse_stats(ch_client)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -274,7 +278,7 @@ def main():
 
     finally:
         conn.close()
-        ch_conn.close()
+        ch_client.close()
 
 
 if __name__ == "__main__":

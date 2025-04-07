@@ -1,49 +1,14 @@
-from datetime import datetime, timezone
-import json
-from seed import get_connection
-import clickhouse_connect
 import os
+import json
+import clickhouse_connect
 
-CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
-CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", 8123))
-CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
-CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "clickhouse")
-
-TARGET_TABLE_NAMES = [
-    "advertiser",           # Base tables
-    "campaign",
-    "impressions",
-    "clicks",
-    "advertiser_stats",     # Aggregated target tables
-    "campaign_stats",
-    "daily_stats",
-]
-
+# Constants
+BASE_TABLES = ["advertiser", "campaign", "impressions", "clicks"]
 ANALYTICS_TABLES = ["advertiser_stats", "campaign_stats", "daily_stats"]
+TARGET_TABLE_NAMES = BASE_TABLES + ANALYTICS_TABLES
 
-
-def get_clickhouse_client():
-    return clickhouse_connect.get_client(
-        host=CLICKHOUSE_HOST,
-        port=CLICKHOUSE_PORT,
-        username=CLICKHOUSE_USER,
-        password=CLICKHOUSE_PASSWORD
-    )
-
-
-def truncate_clickhouse_tables(client, tables):
-    """
-    Truncates both base tables and materialized view target tables in ClickHouse.
-    Should be used before a full sync to avoid duplicate data and double-counting.
-    """
-
-    print("\n🧹 Truncating ClickHouse tables for full sync...")
-    for table_name in tables:
-        try:
-            client.command(f"TRUNCATE TABLE IF EXISTS {table_name}")
-            print(f"✅ Truncated {table_name}")
-        except Exception as e:
-            print(f"❌ Could not truncate {table_name}: {e}")
+LAST_SYNC_FILE = "last_synced_ids.json"
+SQL_PATH = "sql/init"
 
 
 def read_sql(path, name):
@@ -51,87 +16,115 @@ def read_sql(path, name):
         return f.read()
 
 
-def create_clickhouse_tables(conn):
+class ClickHouseClient:
+    def __init__(self):
+        self.client = clickhouse_connect.get_client(
+            host=os.getenv("CLICKHOUSE_HOST", "localhost"),
+            port=int(os.getenv("CLICKHOUSE_PORT", 8123)),
+            username=os.getenv("CLICKHOUSE_USER", "default"),
+            password=os.getenv("CLICKHOUSE_PASSWORD", "clickhouse"),
+        )
 
-    for table_name in TARGET_TABLE_NAMES:
-        conn.query(read_sql("sql/init", table_name + ".sql"))
-
-
-def copy_table(pg_conn, ch_client, table, mode="full", last_id=None):
-    with pg_conn.cursor() as cur:
-
-        if mode == "incremental" and last_id is not None:
-            print(f"Starting from id {last_id}")
-            cur.execute(
-                f"SELECT * FROM {table} WHERE id > %s ORDER BY id", (last_id,))
-        else:
-            print("Loading full table.")
-            cur.execute(f"SELECT * FROM {table} ORDER BY id")
-
-        rows = cur.fetchall()
-        if not rows:
-            print(f"⚠️ No new rows for table '{table}'")
-            return
-
-        columns = [desc[0] for desc in cur.description]
-        ch_client.insert(table, rows, column_names=columns)
-        print(f"✅ Synced {len(rows)} rows into ClickHouse table '{table}'")
-
-        # Return max ID synced
-        return max(row[columns.index("id")] for row in rows)
-
-
-def update_analytics(conn, tables):
-    truncate_clickhouse_tables(conn, tables)
-
-    for table_name in tables:
-        conn.query(read_sql("sql/init", table_name + "_init.sql"))
-
-
-def run_pipeline(pg_conn, ch_conn, mode="full"):
-    # Truncate tables if full load
-    if mode == "full":
-        truncate_clickhouse_tables(ch_conn, TARGET_TABLE_NAMES)
-
-    create_clickhouse_tables(ch_conn)
-
-    # Track last synced IDs per table
-    last_synced_path = "last_synced_ids.json"
-    last_synced = {}
-    if mode == "incremental":
-        if os.path.exists(last_synced_path):
+    def truncate_tables(self, tables):
+        print("\n🧹 Truncating ClickHouse tables for full sync...")
+        for table_name in tables:
             try:
-                with open(last_synced_path, "r") as f:
-                    content = f.read()
-                    last_synced = json.loads(content)
-            except json.JSONDecodeError as e:
-                last_synced = {}
-        else:
-            print(f"[WARN] {last_synced_path} not found.")
+                self.client.command(f"TRUNCATE TABLE IF EXISTS {table_name}")
+                print(f"✅ Truncated {table_name}")
+            except Exception as e:
+                print(f"❌ Could not truncate {table_name}: {e}")
 
-    updated_synced = {}
+    def create_tables(self):
+        for table_name in TARGET_TABLE_NAMES:
+            sql = read_sql(SQL_PATH, table_name + ".sql")
+            self.client.query(sql)
 
-    for table in ['advertiser', 'campaign', 'impressions', 'clicks']:
-        print(f"\n🔄 Copying table: {table}")
-        last_id = int(last_synced.get(table, 0)
-                      ) if mode == "incremental" else None
+    def update_analytics(self):
+        self.truncate_tables(ANALYTICS_TABLES)
+        for table_name in ANALYTICS_TABLES:
+            sql = read_sql(SQL_PATH, table_name + "_init.sql")
+            self.client.query(sql)
 
+    def insert(self, table, rows, column_names):
+        self.client.insert(table, rows, column_names=column_names)
+
+    def query(self, query_str):
+        return self.client.query(query_str)
+
+    def close(self):
+        return self.client.close()
+
+
+class Pipeline:
+    def __init__(self, pg_conn, ch_client: ClickHouseClient, mode="full"):
+        self.pg_conn = pg_conn
+        self.ch_client = ch_client
+        self.mode = mode
+        self.last_synced = {}
+        self.updated_synced = {}
+
+    def load_last_synced_ids(self):
+        if not os.path.exists(LAST_SYNC_FILE):
+            print(f"[WARN] {LAST_SYNC_FILE} not found.")
+            return
         try:
-            max_id = copy_table(pg_conn, ch_conn, table,
-                                mode=mode, last_id=last_id)
-            if max_id:
-                updated_synced[table] = max_id
+            with open(LAST_SYNC_FILE, "r") as f:
+                self.last_synced = json.load(f)
+        except json.JSONDecodeError:
+            self.last_synced = {}
+
+    def save_last_synced_ids(self):
+        self.last_synced.update(self.updated_synced)
+        with open(LAST_SYNC_FILE, "w") as f:
+            json.dump(self.last_synced, f, indent=2)
+        print("\n📝 Updated last_synced_ids.json")
+
+    def copy_table(self, table, last_id=None):
+        with self.pg_conn.cursor() as cur:
+            if self.mode == "incremental" and last_id is not None:
+                print(f"Starting from id {last_id}")
+                cur.execute(
+                    f"SELECT * FROM {table} WHERE id > %s ORDER BY id", (last_id,))
             else:
-                print(f"No updates for table: {table}")
+                print("Loading full table.")
+                cur.execute(f"SELECT * FROM {table} ORDER BY id")
 
-        except Exception as e:
-            print(f"❌ Error syncing table '{table}': {e}")
+            rows = cur.fetchall()
+            if not rows:
+                print(f"⚠️ No new rows for table '{table}'")
+                return
 
-    update_analytics(ch_conn, ANALYTICS_TABLES)
+            columns = [desc[0] for desc in cur.description]
+            self.ch_client.insert(table, rows, column_names=columns)
+            print(f"✅ Synced {len(rows)} rows into ClickHouse table '{table}'")
 
-    last_synced.update(updated_synced)
-    with open("last_synced_ids.json", "w") as f:
-        json.dump(last_synced, f, indent=2)
-    print("\n📝 Updated last_synced_ids.json")
+            return max(row[columns.index("id")] for row in rows)
 
-    print("\n🎉 Sync completed.")
+    def run(self):
+        if self.mode == "full":
+            self.ch_client.truncate_tables(TARGET_TABLE_NAMES)
+
+        self.ch_client.create_tables()
+
+        if self.mode == "incremental":
+            self.load_last_synced_ids()
+
+        for table in BASE_TABLES:
+            print(f"\n🔄 Copying table: {table}")
+            last_id = int(self.last_synced.get(table, 0)
+                          ) if self.mode == "incremental" else None
+            try:
+                max_id = self.copy_table(table, last_id)
+                if max_id:
+                    self.updated_synced[table] = max_id
+                else:
+                    print(f"No updates for table: {table}")
+            except Exception as e:
+                print(f"❌ Error syncing table '{table}': {e}")
+
+        self.ch_client.update_analytics()
+
+        if self.mode == "incremental":
+            self.save_last_synced_ids()
+
+        print("\n🎉 Sync completed.")
