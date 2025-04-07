@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 
+import os
 import argparse
 import sys
+from pipeline import TARGET_TABLE_NAMES, get_clickhouse_client, read_sql, truncate_clickhouse_tables
 from seed import (
     get_connection,
     create_advertisers,
@@ -15,21 +17,26 @@ def parse_args():
     parser = argparse.ArgumentParser(description="AdTech Data Generator")
 
     # Main command subparsers
-    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+    subparsers = parser.add_subparsers(
+        dest="command", help="Command to execute")
 
     # Create advertisers command
-    adv_parser = subparsers.add_parser("advertisers", help="Create advertisers")
-    adv_parser.add_argument("--count", type=int, default=1, help="Number of advertisers to create")
+    adv_parser = subparsers.add_parser(
+        "advertisers", help="Create advertisers")
+    adv_parser.add_argument("--count", type=int, default=1,
+                            help="Number of advertisers to create")
 
     # Create campaigns command
     camp_parser = subparsers.add_parser("campaigns", help="Create campaigns")
     camp_parser.add_argument(
         "--advertiser-id", type=int, required=True, help="Advertiser ID to create campaigns for"
     )
-    camp_parser.add_argument("--count", type=int, default=1, help="Number of campaigns to create")
+    camp_parser.add_argument(
+        "--count", type=int, default=1, help="Number of campaigns to create")
 
     # Create impressions command
-    imp_parser = subparsers.add_parser("impressions", help="Create impressions")
+    imp_parser = subparsers.add_parser(
+        "impressions", help="Create impressions")
     imp_parser.add_argument(
         "--campaign-id", type=int, required=True, help="Campaign ID to create impressions for"
     )
@@ -42,22 +49,42 @@ def parse_args():
     click_parser.add_argument(
         "--campaign-id", type=int, required=True, help="Campaign ID to create clicks for"
     )
-    click_parser.add_argument("--ratio", type=float, default=0.1, help="Click ratio (0.0-1.0)")
+    click_parser.add_argument("--ratio", type=float,
+                              default=0.1, help="Click ratio (0.0-1.0)")
 
     # Batch generation command
-    batch_parser = subparsers.add_parser("batch", help="Generate a batch of test data")
-    batch_parser.add_argument("--advertisers", type=int, default=2, help="Number of advertisers")
-    batch_parser.add_argument("--campaigns", type=int, default=3, help="Campaigns per advertiser")
+    batch_parser = subparsers.add_parser(
+        "batch", help="Generate a batch of test data")
+    batch_parser.add_argument(
+        "--advertisers", type=int, default=2, help="Number of advertisers")
+    batch_parser.add_argument("--campaigns", type=int,
+                              default=3, help="Campaigns per advertiser")
     batch_parser.add_argument(
         "--impressions", type=int, default=100, help="Impressions per campaign"
     )
-    batch_parser.add_argument("--ctr", type=float, default=0.1, help="Click-through rate (0.0-1.0)")
+    batch_parser.add_argument(
+        "--ctr", type=float, default=0.1, help="Click-through rate (0.0-1.0)")
 
     # Show stats command
     subparsers.add_parser("stats", help="Show database statistics")
 
     # Reset command
     subparsers.add_parser("reset", help="Reset all data (USE WITH CAUTION)")
+
+    # Sync Postgres and ClickHouse command
+    sync_parser = subparsers.add_parser(
+        "sync", help="Sync data from PostgreSQL to ClickHouse")
+
+    sync_parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["full", "incremental"],
+        default="full",
+        help="Sync mode: 'full' to reload everything, 'incremental' to only update changed/new records",
+    )
+
+    # Show analytics stats command
+    subparsers.add_parser("chstats", help="Show ClickHouse statistics")
 
     return parser.parse_args()
 
@@ -96,10 +123,10 @@ def show_stats(conn):
         print("\n=== Campaign Details ===")
         cur.execute(
             """
-            SELECT 
-                c.id, 
-                c.name, 
-                a.name as advertiser, 
+            SELECT
+                c.id,
+                c.name,
+                a.name as advertiser,
                 COUNT(DISTINCT i.id) as impressions,
                 COUNT(DISTINCT cl.id) as clicks
             FROM campaign c
@@ -124,7 +151,31 @@ def show_stats(conn):
             )
 
 
-def reset_data(conn):
+def show_clickhouse_stats(conn):
+    print("=== 📊 Campaign CTR ===")
+    ctr_result = conn.query(read_sql("sql/analytics", "campaign_ctr.sql"))
+    print(f"{'Campaign ID':<12} {'Name':<20} {'Impressions':<12} {'Clicks':<8} {'CTR':<6}")
+    print("-" * 60)
+    for row in ctr_result.result_rows:
+        print(f"{row[0]:<12} {row[1]:<20} {row[2]:<12} {row[3]:<8} {row[4]:.2%}")
+
+    print("\n=== 📅 Daily Impressions and Clicks ===")
+    daily_result = conn.query(read_sql("sql/analytics", "daily_metrics.sql"))
+    print(f"{'Date':<12} {'Impressions':<12} {'Clicks':<8} {'CTR':<6}")
+    print("-" * 45)
+    for row in daily_result.result_rows:
+        print(f"{row[0]}   {row[1]:<12} {row[2]:<8} {row[3]:.2%}")
+
+    print("\n=== 📈 CTR per Advertiser ===")
+    advertiser_result = conn.query(
+        read_sql("sql/analytics", "advertiser_ctr.sql"))
+    print(f"{'Advertiser ID':<15} {'Name':<20} {'Impressions':<12} {'Clicks':<8} {'CTR':<6}")
+    print("-" * 65)
+    for row in advertiser_result.result_rows:
+        print(f"{row[0]:<15} {row[1]:<20} {row[2]:<12} {row[3]:<8} {row[4]:.2%}")
+
+
+def reset_data(conn, ch_conn):
     """Reset all data in the database."""
     confirmation = input("This will DELETE ALL DATA. Type 'yes' to confirm: ")
     if confirmation.lower() != "yes":
@@ -140,6 +191,8 @@ def reset_data(conn):
         conn.commit()
         print("All data has been deleted.")
 
+    truncate_clickhouse_tables(ch_conn, TARGET_TABLE_NAMES)
+
 
 def main():
     args = parse_args()
@@ -153,6 +206,11 @@ def main():
         print("Could not connect to Postgres. Exiting.")
         sys.exit(1)
 
+    ch_conn = get_clickhouse_client()
+    if not ch_conn:
+        print("Could not connect to ClickHouse. Exiting.")
+        sys.exit(1)
+
     try:
         if args.command == "advertisers":
             adv_ids = create_advertisers(conn, args.count)
@@ -160,7 +218,8 @@ def main():
             print(f"Created {len(adv_ids)} advertisers. IDs: {adv_ids}")
 
         elif args.command == "campaigns":
-            campaign_ids = create_campaigns(conn, [args.advertiser_id], args.count)
+            campaign_ids = create_campaigns(
+                conn, [args.advertiser_id], args.count)
             conn.commit()
             print(
                 f"Created {len(campaign_ids)} campaigns for advertiser #{args.advertiser_id}. IDs: {campaign_ids}"
@@ -169,7 +228,8 @@ def main():
         elif args.command == "impressions":
             create_impressions(conn, [args.campaign_id], args.count)
             conn.commit()
-            print(f"Created {args.count} impressions for campaign #{args.campaign_id}")
+            print(
+                f"Created {args.count} impressions for campaign #{args.campaign_id}")
 
         elif args.command == "clicks":
             # First get impressions count
@@ -186,18 +246,27 @@ def main():
 
             create_clicks(conn, [args.campaign_id], args.ratio)
             conn.commit()
-            print(f"Created clicks for campaign #{args.campaign_id} with {args.ratio*100:.1f}% CTR")
+            print(
+                f"Created clicks for campaign #{args.campaign_id} with {args.ratio*100:.1f}% CTR")
 
         elif args.command == "batch":
             from seed import main as seed_main
 
-            seed_main(args.advertisers, args.campaigns, args.impressions, args.ctr)
+            seed_main(args.advertisers, args.campaigns,
+                      args.impressions, args.ctr)
 
         elif args.command == "stats":
             show_stats(conn)
 
         elif args.command == "reset":
-            reset_data(conn)
+            reset_data(conn, ch_conn)
+
+        elif args.command == "sync":
+            from pipeline import run_pipeline
+            run_pipeline(conn, ch_conn, mode=args.mode)
+
+        elif args.command == "chstats":
+            show_clickhouse_stats(ch_conn)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -205,6 +274,7 @@ def main():
 
     finally:
         conn.close()
+        ch_conn.close()
 
 
 if __name__ == "__main__":

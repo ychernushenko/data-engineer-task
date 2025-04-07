@@ -114,3 +114,6 @@ celerybeat.pid
 # Environments
 .env
 .venv
+
+# Sync script state
+last_synced_ids.json

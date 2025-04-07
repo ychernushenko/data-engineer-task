@@ -70,6 +70,57 @@ uv run python main.py stats
 uv run python main.py reset
 ```
 
+## Data Sync & KPI Queries
+
+Once data is populated in PostgreSQL, use the following commands to load it into ClickHouse and generate analytics.  
+
+### 🔁 Full Data Sync  
+
+```python main.py sync --mode full```  
+
+- Loads all rows from PostgreSQL into ClickHouse from scratch  
+- Use this when ClickHouse is empty or you want to do a full refresh  
+- Resets sync tracking in last_synced_ids.json  
+
+### 🔄 Incremental Data Sync  
+
+```python main.py sync --mode incremental```  
+- Loads only new rows (based on id values)  
+- Tracks last synced id per table in last_synced_ids.json  
+- Use this to simulate production-style, low-latency ingestion  
+
+### 📊 KPI Analysis  
+
+```python main.py chstats```  
+
+Displays KPI analytics from ClickHouse:  
+- CTR by campaign  
+- Daily impressions and clicks  
+- CTR distribution buckets  
+
+Example output:  
+
+```
+=== 📊 ClickHouse Campaign CTR ===
+Campaign ID  Name                 Impressions  Clicks   CTR   
+------------------------------------------------------------
+1            Campaign_1_1         100          10       10.00%
+...
+
+=== 📅 Daily Impressions and Clicks ===
+Date         Impressions  Clicks   CTR   
+---------------------------------------------
+2025-04-07   150          15       10.00%
+...
+
+=== 📈 CTR per Advertiser ===
+Advertiser ID  Name                 Impressions  Clicks   CTR   
+-----------------------------------------------------------------
+1              Advertiser A         1500         120      8.00%
+2              Advertiser B         1100         95       8.64%
+...
+```
+
 ## Deliverables
 
 Please provide the following:
